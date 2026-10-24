@@ -2,6 +2,7 @@ import logging
 import re
 import pandas as pd
 from config import ISO_FORMAT, STATECODE_MAP
+from decimal import Decimal, InvalidOperation
 
 logger= logging.getLogger(__name__)
 
@@ -48,6 +49,18 @@ def map_status(status, record_id):
         logger.warning("Unknown status for record_id %s: %s", record_id, status)
     return statecode
 
+# Parse amount as exact decimal, invalid ones become empty
+def parse_amount(amount, record_id):
+    if pd.isna(amount):
+        logger.warning("Missing amount for record_id %s", record_id)
+        return None
+    try:
+        return Decimal(amount.strip())
+    except InvalidOperation:
+        logger.warning("Invalid amount for record_id %s: %s", record_id, amount)
+        return None
+
+
 # Build the CDM Contact entity from raw customers
 def transform_customers(customers_df):
     contacts=[]
@@ -61,8 +74,29 @@ def transform_customers(customers_df):
             "emailaddress1": clean_email(row["email_addr"], contact_id),
             "createdon": convert_to_iso(row["signup_date"], contact_id),
             "statecode": map_status(row["user_status"], contact_id),
+
         })
     contacts_df= pd.DataFrame(contacts)
     contacts_df["statecode"]= contacts_df["statecode"].astype("Int64")
     logger.info("Transformed %d customers into contacts", len(contacts_df))
     return contacts_df
+
+# Build the CDM SalesOrder entity, orphan orders are logged and skipped
+def transform_orders(orders_df,  contacts_df):
+    valid_contact_ids= set(contacts_df["contactid"])
+    orders=[]
+    for _,row in orders_df.iterrows():
+        order_id= row["tx_id"].strip()
+        customer_id= row["customer_id"].strip()
+        if customer_id not in valid_contact_ids:
+            logger.warning("Orphan order %s for unknown customer_id %s", order_id, customer_id)
+            continue
+        orders.append({
+            "salesorderid": order_id,
+            "customerid": customer_id,
+            "totalamount": parse_amount(row["amount_usd"], order_id),
+            "createdon": convert_to_iso(row["tx_timestamp"], order_id),
+        })
+    orders_df_clean= pd.DataFrame(orders)
+    logger.info("Transformed %d orders into sales orders", len(orders_df_clean))
+    return orders_df_clean
